@@ -7,7 +7,7 @@
 #include <Pythia8/ParticleData.h>
 #include <Pythia8/Info.h>
 #include <Pythia8/HIInfo.h>
-//#include <Pythia8/UserHooks.h>
+// #include <Pythia8/UserHooks.h>
 #include <array>
 #include <cassert>
 
@@ -112,7 +112,7 @@ void fill(Event &event,
           py::array_t<double> &py,
           py::array_t<double> &pz,
           py::array_t<double> &energy,
-          py::array_t<double> &mass) 
+          py::array_t<double> &mass)
 {
     // Get a raw reference to numpy array
     auto pid_ = pid.unchecked<1>();
@@ -124,10 +124,11 @@ void fill(Event &event,
     auto mass_ = mass.unchecked<1>();
 
     event.reset();
-    for (int i = 0; i != pid.size(); ++i) {
+    for (int i = 0; i != pid.size(); ++i)
+    {
         event.append(pid_[i], status_[i], 0, 0,
                      px_[i], py_[i], pz_[i], energy_[i], mass_[i]);
-    }    
+    }
 }
 
 PYBIND11_MODULE(_pythia8, m)
@@ -146,8 +147,7 @@ PYBIND11_MODULE(_pythia8, m)
                  for (auto p : self)
                      pl.append(p.second);
                  return pl;
-             })
-        ;
+             });
 
     py::class_<ParticleDataEntry, ParticleDataEntryPtr>(m, "ParticleDataEntry")
         .def_property_readonly("id", &ParticleDataEntry::id)
@@ -240,6 +240,13 @@ PYBIND11_MODULE(_pythia8, m)
 
         ;
 
+    py::class_<SubCollisionModel, std::shared_ptr<SubCollisionModel>>(m, "SubCollisionModel")
+        // TODO add getParm
+        ;
+
+    py::class_<HIUserHooks, HIUserHooksPtr>(m, "HIUserHooks")
+        .def_property_readonly("subCollisionModel", &HIUserHooks::subCollisionModel);
+
     py::class_<Pythia>(m, "Pythia")
         .def(py::init<string, bool>(), py::call_guard<py::scoped_ostream_redirect, py::scoped_estream_redirect>())
         .def("init", &Pythia::init, py::call_guard<py::scoped_ostream_redirect, py::scoped_estream_redirect>())
@@ -262,7 +269,8 @@ PYBIND11_MODULE(_pythia8, m)
                      *ptr++ = charge_from_pid(self.particleData, pit->id());
                  return result;
              })
-        ;
+        .def_property_readonly("hiHooks", [](Pythia &self) -> py::object
+                               { return self.hiHooksPtr ? py::cast(self.hiHooksPtr) : py::none(); });
 
     py::class_<Event>(m, "Event")
         .def_property_readonly("size", [](Event &self)
@@ -282,6 +290,5 @@ PYBIND11_MODULE(_pythia8, m)
         .def("daughters", event_array_daughters)
         .def("reset", &Event::reset)
         .def("append", py::overload_cast<int, int, int, int, double, double, double, double, double, double, double>(&Event::append), "pdgid"_a, "status"_a, "col"_a, "acol"_a, "px"_a, "py"_a, "pz"_a, "e"_a, "m"_a = 0, "scale"_a = 0, "pol"_a = 9.)
-        .def("fill", &fill)
-        ;
+        .def("fill", &fill);
 }
