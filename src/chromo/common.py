@@ -23,12 +23,17 @@ from chromo.constants import (
     GeV,
 )
 from chromo.kinematics import EventKinematics, CompositeTarget
+from chromo.util import unique_sorted_pids, select_long_lived
 import dataclasses
 import copy
 from typing import Tuple, Optional
 from contextlib import contextmanager
 import warnings
 from particle import Particle
+from packaging.version import parse as parse_version
+from chromo.decay_handler import Pythia8DecayHandler
+
+all_unstable_pids = select_long_lived()
 
 
 # Do we need EventData.n_spectators in addition to EventData.n_wounded?
@@ -403,6 +408,13 @@ class EventData:
     #     """I don't remember what this was for..."""
     #     return self.en / self.kin.pcm
 
+    def _prepare_for_hepmc(self):
+        """
+        Override this method in classes that need to modify event
+        history for compatibility with HepMC.
+        """
+        return self
+
     def to_hepmc3(self, genevent=None):
         """
         Convert event to HepMC3 GenEvent.
@@ -418,6 +430,12 @@ class EventData:
         """
         import pyhepmc  # delay import
 
+        if parse_version(pyhepmc.__version__) < parse_version("2.13.2"):
+            raise RuntimeError(
+                f"current pyhepmc version is {pyhepmc.__version__} < 2.13.2"
+                f"\nPlease `pip install pyhepmc==2.13.2` or later version",
+            )
+
         model, version = self.generator
 
         if genevent is None:
@@ -425,30 +443,7 @@ class EventData:
             genevent.run_info = pyhepmc.GenRunInfo()
             genevent.run_info.tools = [(model, version, "")]
 
-        # We must apply some workarounds so that HepMC3 conversion and IO works
-        # for all models. This should be revisited once the fundamental issues
-        # with particle histories have been fixed.
-        if model == "Pythia" and version.startswith("8"):
-            # to get a valid GenEvent we must
-            # 1) select only particles produced after the parton shower
-            # 2) connect particles attached to a single beam particle
-            # (diffractive events) to the common interaction vertex (1, 2)
-            # TODO check if this costs significant amount of time and speed it up if so
-            mask = (self.status == 1) | (self.status == 2) | (self.status == 4)
-            ev = self[mask]
-            mask = (ev.mothers[:, 0] == 0) | (ev.mothers[:, 0] == 1)
-            ev.mothers[mask] = (0, 1)
-        elif model in ("UrQMD", "PhoJet", "DPMJET-III"):
-            # can only save final state until history is fixed
-            warnings.warn(
-                f"{model}-{version}: only final state particles "
-                "available in HepMC3 event",
-                RuntimeWarning,
-            )
-            ev = self.final_state()
-        else:
-            ev = self
-
+        ev = self._prepare_for_hepmc()
         genevent.from_hepevt(
             event_number=ev.nevent,
             px=ev.px,
@@ -458,12 +453,13 @@ class EventData:
             m=ev.m,
             pid=ev.pid,
             status=ev.status,
-            parents=(ev.mothers + 1) if ev.mothers is not None else None,
-            children=(ev.daughters + 1) if ev.daughters is not None else None,
+            parents=ev.mothers if ev.mothers is not None else None,
+            children=ev.daughters if ev.daughters is not None else None,
             vx=ev.vx,
             vy=ev.vy,
             vz=ev.vz,
             vt=ev.vt,
+            fortran=False,
         )
 
         return genevent
@@ -522,17 +518,7 @@ class MCEvent(EventData, ABC):
         phep = getattr(evt, self._phep)[:, sel]
         vhep = getattr(evt, self._vhep)[:, sel]
 
-        mothers = (
-            np.maximum(getattr(evt, self._jmohep).T[sel] - 1, -1)
-            if self._jmohep
-            else None
-        )
-        daughters = (
-            np.maximum(getattr(evt, self._jdahep).T[sel] - 1, -1)
-            if self._jdahep
-            else None
-        )
-
+        self._generator_frame = generator._frame
         EventData.__init__(
             self,
             (generator.name, generator.version),
@@ -545,9 +531,12 @@ class MCEvent(EventData, ABC):
             self._charge_init(npart),
             *phep,
             *vhep,
-            mothers,
-            daughters,
+            mothers=getattr(evt, self._jmohep).T[sel] if self._jmohep else None,
+            daughters=getattr(evt, self._jdahep).T[sel] if self._jdahep else None,
         )
+
+        self._history_zero_indexing()
+        self._repair_initial_beam()
 
     @abstractmethod
     def _charge_init(self, npart):
@@ -572,6 +561,25 @@ class MCEvent(EventData, ABC):
         # upon unpickling, create EventData object instead of MCEvent object
         return (EventData,)
 
+    def _repair_initial_beam(self):
+        pass
+
+    def _history_zero_indexing(self):
+        self.mothers = self.mothers - 1
+        self.daughters = self.daughters - 1
+
+    def _prepend_initial_beam(self):
+        beam = self.kin._get_beam_data(self._generator_frame)
+        for field, beam_field in beam.items():
+            event_field = getattr(self, field)
+            if event_field is None:
+                continue
+            if field in ["mothers", "daughters"]:
+                res = np.concatenate((beam_field, event_field + 2))
+            else:
+                res = np.concatenate((beam_field, event_field))
+            setattr(self, field, res)
+
 
 # =========================================================================
 # MCRun
@@ -583,6 +591,7 @@ class MCRun(ABC):
     _set_final_state_particles_called = False
     _projectiles = standard_projectiles
     _targets = Nuclei()
+    _unstable_pids = set(all_unstable_pids)
     _ecm_min = 10 * GeV  # default for many models
     nevents = 0  # number of generated events so far
 
@@ -598,6 +607,7 @@ class MCRun(ABC):
         assert hasattr(self, "_event_class")
         assert hasattr(self, "_frame")
         self._lib = importlib.import_module(f"chromo.models.{self._library_name}")
+        self._apply_decay_handler = False
 
         self._rng = np.random.default_rng(seed)
         if hasattr(self._lib, "npy"):
@@ -619,6 +629,7 @@ class MCRun(ABC):
                     event = self._event_class(self)
                     # boost into frame requested by user
                     self.kinematics.apply_boost(event, self._frame)
+                    self._validate_decay(event)
                     yield event
                     continue
                 nretries += 1
@@ -737,6 +748,64 @@ class MCRun(ABC):
         self._kinematics = kin
         self._set_kinematics(kin)
 
+    def _validate_decay(self, event):
+        """Checks whether all unstable particles are final state particles.
+        If any unstable particles are not yet decayed, it attempts to decay them
+        using the decay_handler.
+        """
+        final_pids = event.pid[event.status == 1]
+        may_decay = np.isin(final_pids, all_unstable_pids)
+
+        if not np.all(np.isin(final_pids[may_decay], self._final_state_particles)):
+            if self._apply_decay_handler:
+                self._decay_handler(event)
+            else:
+                final_pids_dec = final_pids[may_decay]
+                not_decayed = np.logical_not(
+                    np.isin(final_pids_dec, self._final_state_particles)
+                )
+                not_decayed_pids = set(final_pids_dec[not_decayed])
+                warnings.warn(
+                    f"{self.pyname}: {not_decayed_pids} haven't been decayed. "
+                    "Consider to use generator._activate_decay_handler(on=True)",
+                    RuntimeWarning,
+                )
+
+    @property
+    def final_state_particles(self):
+        """Returns a sorted list of particles that can decay
+        but are considered stable by the event generator."""
+        return tuple(unique_sorted_pids(self._final_state_particles))
+
+    @final_state_particles.setter
+    def final_state_particles(self, pdgid):
+        """
+        Sets particles with PDG IDs provided in `pdgid` list as stable particles.
+        All other unstable particles will decay.
+
+        Stable particles in `pdgid` with tau0 = inf are ignored.
+        If self._apply_decay_handler == True, antiparticles are also set stable
+
+        Args:
+            pdgid (list): A list of PDG IDs for particles that should be considered
+                        stable (present in the final state).
+
+        Example:
+            To configure an `QGSJetII04` event generator to treat charged pions
+            (PDG ID 211 and -211) and muons (PDG ID 13 and -13) as stable
+            particles in the final state:
+
+            >>> evt_kin = chromo.kinematics.FixedTarget(100, "p", "p")
+            >>> generator = chromo.models.QGSJetII04(evt_kin)
+            >>> generator.final_state_particles = [211, -211, 13, -13]
+
+            If you need to set particles as stable for those with a lifetime
+            greater than `tau_stable`:
+            >>> generator.final_state_particles = (chromo.util
+                                                  .select_long_lived(tau_stable))
+        """
+        self._set_final_state_particles(pdgid)
+
     def set_stable(self, pdgid, stable=True):
         """Prevent decay of unstable particles
 
@@ -750,8 +819,26 @@ class MCRun(ABC):
         if abs(pdgid) == 311:
             self._set_stable(130, stable)
             self._set_stable(310, stable)
+            pdgid_list = [130, 310]
         else:
             self._set_stable(pdgid, stable)
+            pdgid_list = [pdgid]
+
+            if self._apply_decay_handler:
+                if -pdgid in self._unstable_pids:
+                    pdgid_list.append(-pdgid)
+                    self._set_stable(-pdgid, stable)
+
+        if stable:
+            self._final_state_particles = np.append(
+                self._final_state_particles, pdgid_list
+            ).astype(np.int64)
+        else:
+            is_stable = np.logical_not(np.isin(self._final_state_particles, pdgid_list))
+            self._final_state_particles = self._final_state_particles[is_stable]
+
+        if self._apply_decay_handler:
+            self._set_antiparticles_as_stable()
 
     def set_unstable(self, pdgid):
         """Convenience funtion for `self.set_stable(..., stable=False)`
@@ -803,16 +890,58 @@ class MCRun(ABC):
         assert self._library_name not in self._is_initialized, message
         self._is_initialized.append(self._library_name)
 
-    def _set_final_state_particles(self):
-        """
-        Defines particles as stable.
+    def _set_final_state_particles(self, pdgid=long_lived):
+        """By default defines particles as stable
+        for the default 'tau_stable' value in the config."""
 
-        All long-lived particles (tau > 30 ps) are considered stable.
-        """
-        for pdgid in long_lived:
-            self._set_stable(pdgid, True)
+        self._final_state_particles = np.unique(pdgid)
+        is_unstable = np.isin(self._final_state_particles, list(self._unstable_pids))
+        self._final_state_particles = self._final_state_particles[is_unstable]
+
+        if self._apply_decay_handler:
+            self._set_antiparticles_as_stable()
+
+        for pid in self._unstable_pids:
+            self._set_stable(pid, False)
+
+        for pid in self._final_state_particles:
+            self._set_stable(pid, True)
 
         self._set_final_state_particles_called = True
+
+    def _set_antiparticles_as_stable(self):
+        # Pythia8DecayHandler can decay only pairs particle-antiparticle
+        # Therefore we should exclude antiparticles from unstable
+        anti_particles = -self._final_state_particles
+        has_anti_particles = np.isin(anti_particles, list(self._unstable_pids))
+        anti_particles = anti_particles[has_anti_particles]
+
+        self._final_state_particles = np.unique(
+            np.append(self._final_state_particles, anti_particles).astype(np.int64)
+        )
+
+        self._decay_handler.set_stable(self._final_state_particles)
+
+    def _activate_decay_handler(self, on=True, *, seed=None):
+        if (not on) or (self.pyname == "Pythia8"):
+            self._apply_decay_handler = False
+            return
+
+        if not hasattr(self, "_decay_handler"):
+            try:
+                self._decay_handler = Pythia8DecayHandler([], seed=seed)
+            except ModuleNotFoundError as ex:
+                import warnings
+
+                warnings.warn(
+                    f"Pythia8DecayHandler not available:\n{ex}\n"
+                    "Some particles may not decay",
+                    RuntimeWarning,
+                )
+                self._apply_decay_handler = False
+                return
+
+        self._apply_decay_handler = True
 
     @contextmanager
     def _temporary_kinematics(self, kin):
