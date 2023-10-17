@@ -67,6 +67,7 @@ cmake_print_variables(PYTHON_LIBRARIES)
 cmake_print_variables(F2PY_INCLUDE_DIR)
 cmake_print_variables(NUMPY_INCLUDE_DIRS)
 cmake_print_variables(BUILD_dev_dpmjetIII193)
+cmake_print_variables(BUILD_dev_sib23d)
 
 include_directories(
   ${PYTHON_INCLUDE_DIRS}
@@ -122,11 +123,17 @@ else() # Windows MinGW!
   # set(FLAGSF90 ${FLAGS} -ffree-form -Wobsolescent -fno-second-underscore)
 endif()
 
+if(NOT CMAKE_GENERATOR STREQUAL "Ninja")
+    add_compile_options(
+      $<$<COMPILE_LANGUAGE:Fortran>:-cpp>
+    )
+  endif()
+
 ### common for all models
 set(chromo_definitions CHROMO)
 set(fortran_dir ${CMAKE_SOURCE_DIR}/src/fortran)
 set(cpp_dir ${CMAKE_SOURCE_DIR}/src/cpp)
-set(f2py_dir ${CMAKE_SOURCE_DIR}/src/f2py)
+set(f2py_dir ${CMAKE_CURRENT_BINARY_DIR})
 # Copy fortranobject.c to get rid of deep folder nesting
 configure_file(${F2PY_INCLUDE_DIR}/fortranobject.c fortranobject.c COPYONLY)
 set(f2py_source fortranobject.c)
@@ -144,7 +151,7 @@ list(APPEND eposlhc_sources ${fortran_dir}/epos/epos-random-dummy.f)
 
 f2py_add_module(_eposlhc
   FUNCTIONS
-  aaset ainit aepos afinal hepmcstore
+  aaset ainit aepos alist afinal hepmcstore
   getcharge idtrafo initepos initeposevt
   xsection rmmard ${chromo_functions}
   SOURCES
@@ -155,7 +162,7 @@ f2py_add_module(_eposlhc
   ${fortran_dir}/epos/sources/epos-bas-lhc.f
   ${fortran_dir}/epos/sources/epos-ids-lhc.f
   ${fortran_dir}/epos/sources/epos_interface.f
-  ${fortran_dir}/epos/sources/epos-random.f
+  ${fortran_dir}/epos/epos-random-dummy.f
   ${rangen_source}
   ${logging_source}
   INCLUDE_DIRS

@@ -52,6 +52,28 @@ class PYTHIA8Event(EventData):
             return (0, 0)
         return hi.nPartProj, hi.nPartTarg
 
+    def _prepare_for_hepmc(self):
+        model, version = self.generator
+        warnings.warn(
+            f"{model}-{version}: only part of the history " "available in HepMC3 event",
+            RuntimeWarning,
+        )
+
+        # We must apply some workarounds so that HepMC3 conversion and IO works
+        # for all models. This should be revisited once the fundamental issues
+        # with particle histories have been fixed.
+
+        # to get a valid GenEvent we must
+        # 1) select only particles produced after the parton shower
+        # 2) connect particles attached to a single beam particle
+        # (diffractive events) to the common interaction vertex (1, 2)
+        # TODO check if this costs significant amount of time and speed it up if so
+        mask = (self.status == 1) | (self.status == 2) | (self.status == 4)
+        ev = self[mask]
+        mask = (ev.mothers[:, 0] == 0) | (ev.mothers[:, 0] == 1)
+        ev.mothers[mask] = (0, 1)
+        return ev
+
 
 class Pythia8(MCRun):
     _name = "Pythia"
@@ -59,6 +81,7 @@ class Pythia8(MCRun):
     _library_name = "_pythia8"
     _event_class = PYTHIA8Event
     _frame = EventFrame.CENTER_OF_MASS
+    # Nuclei are supported in principle, but generation is very slow.
     # Support for more nuclei can be added with ParticleData.addParticle.
     _targets = standard_projectiles | {
         name2pdg(x)
@@ -109,7 +132,11 @@ class Pythia8(MCRun):
         self._pythia = self._lib.Pythia(datdir, banner)
 
         if config is None:
-            self._config = ["SoftQCD:inelastic = on"]
+            if evt_kin.p1 == lp.photon.pdgid and evt_kin.p2 == lp.photon.pdgid:
+                self._config = ["PhotonCollision:all = on"]
+            else:
+                # includes gamma p processes
+                self._config = ["SoftQCD:inelastic = on"]
         else:
             self._config = self._parse_config(config)
 
@@ -120,9 +147,11 @@ class Pythia8(MCRun):
             # Pythia's RANMAR PRNG accepts only seeds smaller than 900_000_000,
             # this may change in the future if they switch to a different PRNG
             f"Random:seed = {self.seed % 900_000_000}",
-            # reduce verbosity
-            "Print:quiet = on",
         ]
+
+        # Add "Print:quiet = on" if no "Print:quiet" is in config
+        if not any("Print:quiet" in s for s in self._config):
+            self._config.append("Print:quiet = on")
 
         # must come last
         if evt_kin is None:
@@ -251,7 +280,7 @@ class Pythia8(MCRun):
             for item in config:
                 result.append(item.strip())
 
-        ignored = ("Random:", "Beams:", "Print:", "Next:")
+        ignored = ("Random:", "Beams:", "Next:")
 
         result2: List[str] = []
         for line in result:
