@@ -10,9 +10,11 @@ import shutil
 import numpy as np
 from typing import Sequence, Set, Tuple, Collection, Union
 from particle import Particle, PDGID, ParticleNotFound, InvalidParticle
-from chromo.constants import MeV, nucleon_mass
+from chromo.constants import MeV, nucleon_mass, sec2cm
 from enum import Enum
 import dataclasses
+import copy
+import math
 
 EventFrame = Enum("EventFrame", ["CENTER_OF_MASS", "FIXED_TARGET", "GENERIC"])
 
@@ -56,6 +58,21 @@ class CompositeTarget:
         self.components = tuple(c)
         self.fractions = fractions / np.sum(fractions)
         self.fractions.flags["WRITEABLE"] = False
+
+    def copy(self):
+        new_target = CompositeTarget([("N", 1)])
+        for field in dataclasses.fields(CompositeTarget):
+            setattr(new_target, field.name, copy.copy(getattr(self, field.name)))
+        return new_target
+
+    def __eq__(self, other):
+        if not isinstance(other, CompositeTarget):
+            return False
+        return (
+            (self.label == other.label)
+            & (self.components == other.components)
+            & (np.allclose(self.fractions, other.fractions))
+        )
 
     @property
     def Z(self):
@@ -266,14 +283,9 @@ def process_particle(x):
 def fortran_chars(array_ref, char_seq):
     """Helper to set fortran character arrays with python strings"""
     info(10, "Setting fortran array with", char_seq)
-    # Reset
-    import numpy as np
-
     len_arr = int(str(array_ref.dtype)[2:])
     len_seq = len(char_seq)
-    return np.array(
-        [c for c in char_seq + (len_arr - len_seq) * " "], dtype="S" + str(len_arr)
-    )
+    return char_seq + (len_arr - len_seq) * " "
 
 
 def caller_name(skip=2):
@@ -687,3 +699,37 @@ class Nuclei:
 
     def __ror__(self, other: Set[PDGID]):
         return self.__or__(other)
+
+
+def unique_sorted_pids(ids):
+    """np.arrays of unique ids sorted by abs value
+    with negative value first, e.g.
+    -11, 11, -12, 12, ...
+    """
+    uids = np.unique(np.fromiter(ids, dtype=np.int64))
+    return uids[np.argsort(2 * np.abs(uids) - (uids < 0))]
+
+
+def select_long_lived(tau=0, mm=False):
+    """
+    Returns unstable particles that are stable
+    for `tau` sec (or mm if mm=True).
+    By default returns all unstable particles excluding nuclei.
+    """
+    if not mm:
+        tau = tau * sec2cm * 1e1  # in mm
+
+    long_lived = []
+    for p in Particle.findall():
+        pid = int(p.pdgid)
+        ctau = p.ctau
+        if (
+            (ctau is not None)
+            and (not math.isinf(ctau))
+            and (not math.isnan(ctau))
+            and (abs(pid) < 1000000000)  # exclude nuclei
+            and (ctau > tau)
+        ):
+            long_lived.append(pid)
+
+    return long_lived
