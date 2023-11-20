@@ -163,6 +163,34 @@ class Pythia8(MCRun):
 
     def _cross_section(self, kin=None):
         st = self._pythia.info.sigmaTot
+        
+        #Idea 1: add a condition of idA/idA pair to grab angantyr xsec  
+        #in = self._pythia.info
+        #
+        #if (kin.p1.A or 0) > 1 or (kin.p2.A or 1) > 1:
+        #    total=in.sigmaGen(0),
+        #    inelastic=in.sigmaGen(0) - in.sigmaGen(102),
+        #    elastic=in.sigmaGen(102),
+        #    diffractive_ax=in.sigmaGen(104),
+        #    diffractive_xb=in.sigmaGen(103),
+        #    diffractive_xx=in.sigmaGen(105),
+        #    diffractive_axb=in.sigmaGen(106)    
+        #else: 
+        #    total=st.sigmaTot,
+        #    inelastic=st.sigmaTot - st.sigmaEl,
+        #    elastic=st.sigmaEl,
+        #    diffractive_ax=st.sigmaAX,
+        #    diffractive_xb=st.sigmaXB,
+        #    diffractive_xx=st.sigmaXX,
+        #    diffractive_axb=st.sigmaAXB
+        # 
+        # return CrossSectionData(
+        #    total,inelastic, elastic, diffractive_ax,
+        #    diffractive_xb, diffractive_xx, diffractive_axb,
+        #) 
+        
+        #Idea 2: define _cross_section_angantyr() for angantyr xsec? 
+        
         return CrossSectionData(
             total=st.sigmaTot,
             inelastic=st.sigmaTot - st.sigmaEl,
