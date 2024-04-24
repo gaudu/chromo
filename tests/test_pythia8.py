@@ -57,6 +57,26 @@ def test_cross_section():
         c.non_diffractive,
         c.inelastic - c.diffractive_xb - c.diffractive_ax - c.diffractive_xx,
     )
+  
+    
+def test_nuclear_cross_section():
+    c = run_cross_section(2000 * GeV, "p", "He")
+    # TODO take into account the event number in run_cross_section?
+    # xsec for 10.000 events, gets closer to true value with more statistics
+    # TODO evaluate tolerance for pHe@2000
+    assert_allclose(c.total, 176.5, atol=0.1)
+    assert_allclose(c.inelastic, 173.6, atol=0.1)
+    assert_allclose(c.elastic, 0.3156, atol=0.1)
+    assert_allclose(c.diffractive_xb, 24.41, atol=0.1)
+    assert_allclose(c.diffractive_ax, 23.62 , atol=0.1)
+    assert_allclose(c.diffractive_xx, 5.541, atol=0.1)
+    assert c.diffractive_axb == 0
+    # TODO add non_diffractive component in CrossSectionData (common.py)?
+    # non_diffractive = 122.6 +- 0.05001
+    assert_allclose(
+        c.non_diffractive,
+        c.inelastic - c.diffractive_xb - c.diffractive_ax - c.diffractive_xx,
+    )
 
 
 def test_charge(event):
